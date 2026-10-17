@@ -1,0 +1,38 @@
+name: Release
+
+# Push a tag such as v0.1.0 to build c1lut and publish it as a GitHub Release.
+# install.sh always downloads the latest release's c1lut-macos.zip.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Stamp the version
+        run: printf '// Set by the release workflow.\nlet c1lutVersion = "%s"\n' "${GITHUB_REF_NAME#v}" > Sources/c1lut/Version.swift
+
+      - name: Test
+        run: swift test
+
+      - name: Build
+        run: scripts/build-release.sh
+
+      - name: Check the binary
+        run: |
+          unzip -o -q dist/c1lut-macos.zip -d dist/check
+          lipo -info dist/check/c1lut
+          test "$(dist/check/c1lut version)" = "${GITHUB_REF_NAME#v}"
+          # Run the Intel half too when Rosetta is available.
+          if arch -x86_64 /usr/bin/true 2>/dev/null; then arch -x86_64 dist/check/c1lut version; fi
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/c1lut-macos.zip --title "c1lut ${GITHUB_REF_NAME#v}" --generate-notes

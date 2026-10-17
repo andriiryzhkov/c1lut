@@ -1,0 +1,24 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:c1lut}",
+            "name": "Debug c1lut",
+            "target": "c1lut",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug c1lut"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:c1lut}",
+            "name": "Release c1lut",
+            "target": "c1lut",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release c1lut"
+        }
+    ]
+}

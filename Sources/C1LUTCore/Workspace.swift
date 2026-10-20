@@ -17,8 +17,6 @@ public struct Workspace {
     }
 
     public var gridsDirectory: URL { root.appendingPathComponent("grids", isDirectory: true) }
-    /// Where the Capture One recipe writes its renders.
-    public var renderDirectory: URL { root.appendingPathComponent("render", isDirectory: true) }
     var baseDirectory: URL { root.appendingPathComponent("base", isDirectory: true) }
 
     public static var defaultOutputDirectory: URL {

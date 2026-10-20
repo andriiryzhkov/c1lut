@@ -21,22 +21,9 @@ end run
 on startExport()
 	set supportDir to my helperOutput({"path", "support"})
 
-	set targetChoices to {}
-	repeat with targetLine in my plainLines(item 2 of my runHelper({"targets"}))
-		set saved to AppleScript's text item delimiters
-		set AppleScript's text item delimiters to tab
-		set parts to text items of (contents of targetLine)
-		set AppleScript's text item delimiters to saved
-		if (count of parts) is 2 then set end of targetChoices to (item 1 of parts) & " — " & (item 2 of parts)
-	end repeat
-	set picked to choose from list targetChoices with title "c1lut" with prompt "Make LUTs for:" default items {item 1 of targetChoices}
-	if picked is false then return
-	set targetId to word 1 of (item 1 of picked)
-
-	tell application "Capture One" to set styleList to available styles
-	if (count of styleList) is 0 then error "Capture One has no styles yet."
-	set styleNames to choose from list styleList with title "c1lut" with prompt "Styles to export as LUTs:" with multiple selections allowed
-	if styleNames is false then return
+	-- c1lut's own window: the target and Capture One's styles as a tree with checkboxes.
+	set {targetId, styleNames} to my pickStyles()
+	if styleNames is {} then return
 
 	my ensureBase(targetId)
 	my ensureSession(supportDir)
@@ -51,6 +38,28 @@ on startExport()
 	if styleCount is 1 then set styleWord to "style"
 	display notification "Exporting " & styleCount & " " & styleWord & ". Capture One opens the c1lut session while it works." with title "c1lut"
 end startExport
+
+-- Opens c1lut's picker window with Capture One's styles in their folders.
+-- Returns {target id, chosen style names}; the names are {} when cancelled.
+on pickStyles()
+	tell application "Capture One" to set styleList to available styles
+	if (count of styleList) is 0 then error "Capture One has no styles yet."
+	set appPath to POSIX path of (path to application "Capture One")
+	set {exitStatus, outLines} to my runHelper({"pick-styles", "--app", appPath, "--"} & styleList)
+	if exitStatus is 5 then return {"", {}} -- Cancel
+	if exitStatus is not 0 then error my joinWith(outLines, return)
+
+	-- "target<TAB>id" and "style<TAB>name" lines; anything else is noise from macOS.
+	set targetId to ""
+	set styleNames to {}
+	repeat with lineRef in outLines
+		set s to contents of lineRef
+		if s starts with ("target" & tab) then set targetId to text 8 thru -1 of s
+		if s starts with ("style" & tab) then set end of styleNames to text 7 thru -1 of s
+	end repeat
+	if targetId is "" then return {"", {}}
+	return {targetId, styleNames}
+end pickStyles
 
 -- V-Log targets start from Panasonic's V-Log → V-709 LUT. The installer usually downloads it;
 -- otherwise c1lut downloads it from Panasonic now, or the user picks a copy they already have.

@@ -208,13 +208,25 @@ func approxEqual(_ a: RGB, _ b: RGB, _ tolerance: Double) -> Bool {
 
 // MARK: Targets and naming
 
-@Test func lumixNamesFitTheCamera() {
-    let lumix = Target.named("lumix")!
+@Test func lumixNamesFitFAT32Cards() {
+    let lumix = Target.named("lumix-sd")!
     #expect(lumix.baseFileName(for: "My Look 2024 ✨") == "MYLOOK20")
     #expect(lumix.baseFileName(for: "Café crème") == "CAFECREM")
     #expect(lumix.baseFileName(for: "Портрет") == "PORTRET")
     #expect(lumix.baseFileName(for: "★★★") == "LUT")
     #expect(lumix.title(for: "Café \"crème\"") == "Cafe creme")
+}
+
+@Test func lumixNamesOnExFATCardsKeepTheWholeName() {
+    let lumix = Target.named("lumix")!
+    #expect(lumix.baseFileName(for: "ST Golden Hour") == "STGoldenHour")
+    #expect(lumix.baseFileName(for: "1. Background - Cold") == "1BackgroundCold")
+    #expect(lumix.baseFileName(for: "Set I - 017 Kodak Portra 400") == "SetI017KodakPortra400")
+    #expect(lumix.baseFileName(for: "B&W Punch") == "BWPunch")
+    #expect(lumix.baseFileName(for: "café crème") == "CafeCreme")
+    #expect(lumix.baseFileName(for: "★★★") == "LUT")
+    #expect(lumix.baseFileName(for: String(repeating: "a", count: 400)).count == 250)
+    #expect(lumix.title(for: "Café") == "Cafe")
 }
 
 @Test func freeNamesOnlyLoseUnsafeCharacters() {
@@ -227,7 +239,7 @@ func approxEqual(_ a: RGB, _ b: RGB, _ tolerance: Double) -> Bool {
 @Test func outputNamesAvoidOverwritingOtherStyles() throws {
     let dir = try temporaryDirectory()
     defer { try? FileManager.default.removeItem(at: dir) }
-    let lumix = Target.named("lumix")!
+    let lumix = Target.named("lumix-sd")!
     var lut = CubeLUT.identity(size: 2)
 
     let first = lumix.outputURL(for: "Portrait Warm", in: dir)
@@ -344,6 +356,102 @@ func makeZip(_ files: [String: CubeLUT], in dir: URL) throws -> URL {
     for (a, b) in zip(loaded.table, full.table) {
         #expect(approxEqual(a, b, 2e-6))
     }
+}
+
+// MARK: Style tree
+
+func makeStyles(_ paths: [String], in root: URL) throws {
+    for path in paths {
+        let url = root.appendingPathComponent(path + ".costyle")
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("<xml/>".utf8).write(to: url)
+    }
+}
+
+@Test func styleTreeFollowsCaptureOnesOrderAndFolders() throws {
+    let dir = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let builtIn = dir.appendingPathComponent("app"), user = dir.appendingPathComponent("user")
+    try makeStyles(["Base Edits/Bright Contrast", "Base Edits/Flat Contrast"], in: builtIn)
+    try makeStyles(["Travel/ST Base", "Travel/Helpers/ST Muted", "Film/Original/Portra", "Film/Layered/Portra", "Loose"],
+                   in: user)
+    // Capture One's order, with a tool preset ("Color - Default") that has no style file.
+    let available = ["Bright Contrast", "Flat Contrast", "Portra", "Portra", "ST Base", "ST Muted", "Loose", "Color - Default"]
+    let tree = StyleTree(available: available, roots: [
+        .init(label: "Built-in Styles", directory: builtIn), .init(label: "User Styles", directory: user),
+    ])
+
+    let e = StyleTree.indent
+    #expect(tree.rows.map(\.display) == [
+        "📁 Built-in Styles",
+        e + "📁 Base Edits",
+        e + e + "Bright Contrast",
+        e + e + "Flat Contrast",
+        "📁 User Styles",
+        e + "📁 Film",
+        e + e + "📁 Layered",
+        e + e + e + "Portra",
+        e + e + "📁 Original",
+        e + e + e + "Portra" + StyleTree.duplicateNote,
+        e + "📁 Travel",
+        e + e + "ST Base",
+        e + e + "📁 Helpers",
+        e + e + e + "ST Muted",
+        e + "Loose",
+    ])
+    let byDisplay = Dictionary(uniqueKeysWithValues: tree.rows.map { ($0.display, $0) })
+    #expect(byDisplay["📁 User Styles"]?.styleNames == ["Portra", "ST Base", "ST Muted", "Loose"])
+    #expect(byDisplay[e + "📁 Travel"]?.styleNames == ["ST Base", "ST Muted"])
+    #expect(byDisplay[e + e + e + "Portra" + StyleTree.duplicateNote]?.styleNames == [])
+    #expect(byDisplay[e + e + "📁 Original"]?.isFolder == true)
+}
+
+@Test func selectingFoldersAndStyles() throws {
+    let dir = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: dir) }
+    try makeStyles(["Travel/ST Base", "Travel/Helpers/ST Muted", "Film/Original/Portra", "Film/Layered/Portra"], in: dir)
+    let tree = StyleTree(available: ["ST Base", "ST Muted", "Portra", "Portra"],
+                         roots: [.init(label: "User Styles", directory: dir)])
+    let user = try #require(tree.root.children.first)
+    let travel = try #require(user.children.first { $0.name == "Travel" })
+    let film = try #require(user.children.first { $0.name == "Film" })
+    let helpers = try #require(travel.children.first { $0.name == "Helpers" })
+    let base = try #require(travel.children.first { $0.name == "ST Base" })
+
+    #expect(user.checkState == .off)
+    // A folder selects everything inside, including subfolders.
+    travel.toggle()
+    #expect(travel.checkState == .on && helpers.checkState == .on)
+    #expect(user.checkState == .mixed)
+    #expect(tree.root.checkedStyleNames == ["ST Base", "ST Muted"])
+    // Deselecting one style leaves the folder partly selected; selecting the folder again selects all.
+    base.toggle()
+    #expect(travel.checkState == .mixed)
+    travel.toggle()
+    #expect(travel.checkState == .on)
+    travel.toggle()
+    #expect(travel.checkState == .off)
+
+    // The second "Portra" can't be selected, so its folder counts as fully selected without it.
+    let layered = try #require(film.children.first { $0.name == "Layered" })
+    let original = try #require(film.children.first { $0.name == "Original" })
+    let duplicate = try #require(original.children.first)
+    #expect(duplicate.isDuplicate && !duplicate.isExportable && !original.isExportable)
+    duplicate.toggle()
+    #expect(duplicate.checkState == .off)
+    film.toggle()
+    #expect(film.checkState == .on && layered.checkState == .on && original.checkState == .off)
+    #expect(tree.root.checkedStyleNames == ["Portra"])
+}
+
+@Test func styleTreeKeepsRowsDistinct() throws {
+    let dir = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: dir) }
+    try makeStyles(["A/Looks/One", "B/Looks/Two"], in: dir)
+    let tree = StyleTree(available: ["One", "Two"], roots: [.init(label: "User Styles", directory: dir)])
+    let displays = tree.rows.map(\.display)
+    #expect(Set(displays).count == displays.count)
+    #expect(tree.rows.filter(\.isFolder).count == 5)
 }
 
 @Test func baseSanityCheckFlagsNonVLogLUTs() {

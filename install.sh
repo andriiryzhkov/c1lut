@@ -25,8 +25,8 @@ trap 'rm -rf "$work"' EXIT
 if [ -f "$0" ] && [ -f "$(dirname "$0")/Package.swift" ]; then
     src=$(cd "$(dirname "$0")" && pwd)
     echo "Building c1lut from source…"
-    swift build --package-path "$src" -c release --product c1lut
-    bin="$(swift build --package-path "$src" -c release --product c1lut --show-bin-path)/c1lut"
+    swift build --package-path "$src" -c release --product c1lut --scratch-path "$src/.build/install"
+    bin="$(swift build --package-path "$src" -c release --product c1lut --scratch-path "$src/.build/install" --show-bin-path)/c1lut"
 else
     echo "Downloading c1lut…"
     curl -fsSL "$URL" -o "$work/c1lut.zip" || fail "could not download $URL"

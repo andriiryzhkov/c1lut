@@ -29,17 +29,16 @@ end run
 
 on exportStyles(targetId, styleNames, gui)
 	set supportDir to my helperOutput({"path", "support"})
-	set renderDir to my helperOutput({"path", "render"})
 	set outDir to my helperOutput({"path", "output", "--target", targetId})
 	set gridFile to my helperOutput({"grid", "--target", targetId})
 	set gridFolder to do shell script "dirname " & quoted form of gridFile
 	set gridName to do shell script "basename " & quoted form of gridFile & " .tif"
-	do shell script "mkdir -p " & quoted form of renderDir & " " & quoted form of outDir
+	do shell script "mkdir -p " & quoted form of outDir
 
-	set {doc, openedHere} to my openSession(supportDir)
+	set {doc, openedHere, sessionFolder} to my openSession(supportDir)
 	try
-		set v to my gridVariant(doc, gridFolder, gridName)
-		my prepareRecipe(doc, renderDir)
+		set v to my gridVariant(doc, gridFile, gridName, sessionFolder & "/Capture")
+		set renderDir to my prepareRecipe(doc, sessionFolder)
 		my checkBaseline(doc, v, renderDir, gridFolder, targetId, gui)
 
 		set entries to {}
@@ -51,12 +50,13 @@ on exportStyles(targetId, styleNames, gui)
 			set notes to my applyStyle(v, styleName)
 			set rendered to my render(doc, v, "c1lut-" & i, renderDir)
 			set {exitStatus, outLines} to my runHelper({"build", rendered, "--name", styleName, "--target", targetId, "--out", outDir})
+			do shell script "rm -f " & quoted form of rendered
 			if exitStatus is not 0 then error "Could not build the LUT for “" & styleName & "”: " & my joinWith(outLines, " ")
 			set lutFile to item 1 of my plainLines(outLines)
 			set end of lutFiles to lutFile
 			set entry to "• " & styleName & " → " & my baseName(lutFile)
 			repeat with noteRef in (notes & my warningLines(outLines))
-				set entry to entry & return & "    " & (contents of noteRef)
+				set entry to entry & linefeed & "    " & (contents of noteRef)
 			end repeat
 			set end of entries to entry
 		end repeat
@@ -67,13 +67,13 @@ on exportStyles(targetId, styleNames, gui)
 		error errorMessage number errorNumber
 	end try
 	if openedHere then my closeSession(doc)
-	return {report:my joinWith(entries, return), outFolder:outDir, lutFiles:lutFiles, targetId:targetId}
+	return {report:my joinWith(entries, linefeed), outFolder:outDir, lutFiles:lutFiles, targetId:targetId}
 end exportStyles
 
 -- MARK: Capture One
 
 -- Opens the session c1lut renders in (chosen once in the Scripts-menu entry).
--- Returns {document, whether this script opened it}.
+-- Returns {document, whether this script opened it, the session's folder}.
 on openSession(supportDir)
 	try
 		set sessionPath to do shell script "cat " & quoted form of (supportDir & "/session-path")
@@ -82,15 +82,16 @@ on openSession(supportDir)
 		error "c1lut has no Capture One session yet. Run Scripts › Export Styles as LUTs in Capture One once to choose it."
 	end try
 	set sessionName to do shell script "basename " & quoted form of sessionPath & " .cosessiondb"
+	set sessionFolder to do shell script "dirname " & quoted form of sessionPath
 	set existing to my findDocument(sessionName)
-	if existing is not missing value then return {existing, false}
+	if existing is not missing value then return {existing, false, sessionFolder}
 
 	set sessionFile to POSIX file sessionPath
 	tell application "Capture One" to open sessionFile
 	repeat 60 times
 		delay 0.5
 		set opened to my findDocument(sessionName)
-		if opened is not missing value then return {opened, true}
+		if opened is not missing value then return {opened, true, sessionFolder}
 	end repeat
 	error "Capture One did not open the c1lut session (" & sessionPath & ")."
 end openSession
@@ -111,9 +112,12 @@ on closeSession(doc)
 	end try
 end closeSession
 
--- Points the session at the grid's folder and returns the grid image's variant.
-on gridVariant(doc, gridFolder, gridName)
-	tell application "Capture One" to browse doc to path gridFolder
+-- Copies the grid into the session's Capture folder, shows that folder and returns the grid
+-- image's variant. Capture One won't browse folders inside ~/Library, where c1lut keeps grids.
+on gridVariant(doc, gridFile, gridName, captureFolder)
+	set gridCopy to captureFolder & "/" & gridName & ".tif"
+	do shell script "mkdir -p " & quoted form of captureFolder & " && find " & quoted form of captureFolder & " -maxdepth 1 -name 'grid-*.tif' ! -name " & quoted form of (gridName & ".tif") & " -delete && { [ -e " & quoted form of gridCopy & " ] || cp " & quoted form of gridFile & " " & quoted form of gridCopy & "; }"
+	tell application "Capture One" to browse doc to path captureFolder
 	repeat 120 times
 		tell application "Capture One"
 			set matches to (every image of doc whose name starts with gridName)
@@ -124,9 +128,15 @@ on gridVariant(doc, gridFolder, gridName)
 	error "Capture One did not show the c1lut grid from " & gridFolder & "."
 end gridVariant
 
--- The c1lut recipe: full-size 16-bit TIFF in sRGB, no output sharpening, into renderDir.
-on prepareRecipe(doc, renderDir)
-	set renderFolder to POSIX file renderDir
+-- The c1lut recipe: full-size 16-bit TIFF in sRGB, no output sharpening, into the session's
+-- Output folder (a custom folder doesn't stick on a new recipe). Returns that folder's path.
+on prepareRecipe(doc, sessionFolder)
+	set renderDir to sessionFolder & "/Output"
+	try
+		tell application "Capture One" to set outputFolder to output of doc
+		set renderDir to POSIX path of outputFolder
+		if renderDir ends with "/" then set renderDir to text 1 thru -2 of renderDir
+	end try
 	tell application "Capture One"
 		tell doc
 			if not (exists recipe recipeName) then make new recipe with properties {name:recipeName}
@@ -140,8 +150,8 @@ on prepareRecipe(doc, renderDir)
 				set primary scaling value to 100
 				set upscale to false
 				set sharpening to no output sharpening
-				set root folder type to custom location
-				set root folder location to renderFolder
+				set root folder type to output location
+				set output sub folder to ""
 				set existing files to overwrite
 			end tell
 		end tell
@@ -154,7 +164,7 @@ on prepareRecipe(doc, renderDir)
 			end try
 			set actualProfile to color profile of recipe recipeName of doc
 		end tell
-		if actualProfile is (contents of candidate) then return
+		if actualProfile is (contents of candidate) then return renderDir
 	end repeat
 	error "Could not set the c1lut recipe’s ICC profile to sRGB. In the c1lut session, select the “c1lut” process recipe, set its ICC Profile to sRGB and try again."
 end prepareRecipe
@@ -170,6 +180,7 @@ on checkBaseline(doc, v, renderDir, gridFolder, targetId, gui)
 	my clearAdjustments(v)
 	set rendered to my render(doc, v, "c1lut-check", renderDir)
 	set {exitStatus, outLines} to my runHelper({"check", rendered, "--target", targetId})
+	do shell script "rm -f " & quoted form of rendered
 	if exitStatus is 0 then
 		do shell script "touch " & quoted form of marker
 		return
@@ -252,87 +263,87 @@ on dropLocal(owner, prefix)
 	set dropped to {}
 	tell application "Capture One"
 		try
-			set x to clarity amount of adjustments of owner
-			if x is not 0 then
+			set currentValue to clarity amount of adjustments of owner
+			if currentValue is not 0 then
 				set clarity amount of adjustments of owner to 0
-				set end of dropped to "Clarity " & x
+				set end of dropped to "Clarity " & my numberText(currentValue)
 			end if
 		end try
 		try
-			set x to clarity structure of adjustments of owner
-			if x is not 0 then
+			set currentValue to clarity structure of adjustments of owner
+			if currentValue is not 0 then
 				set clarity structure of adjustments of owner to 0
-				set end of dropped to "Structure " & x
+				set end of dropped to "Structure " & my numberText(currentValue)
 			end if
 		end try
 		try
-			set x to dehaze amount of adjustments of owner
-			if x is not 0 then
+			set currentValue to dehaze amount of adjustments of owner
+			if currentValue is not 0 then
 				set dehaze amount of adjustments of owner to 0
-				set end of dropped to "Dehaze " & x
+				set end of dropped to "Dehaze " & my numberText(currentValue)
 			end if
 		end try
 		try
-			set x to highlight recovery of adjustments of owner
-			if x is not 0 then
+			set currentValue to highlight recovery of adjustments of owner
+			if currentValue is not 0 then
 				set highlight recovery of adjustments of owner to 0
-				set end of dropped to "HDR Highlight " & x
+				set end of dropped to "HDR Highlight " & my numberText(currentValue)
 			end if
 		end try
 		try
-			set x to shadow recovery of adjustments of owner
-			if x is not 0 then
+			set currentValue to shadow recovery of adjustments of owner
+			if currentValue is not 0 then
 				set shadow recovery of adjustments of owner to 0
-				set end of dropped to "HDR Shadow " & x
+				set end of dropped to "HDR Shadow " & my numberText(currentValue)
 			end if
 		end try
 		try
-			set x to vignetting amount of adjustments of owner
-			if x is not 0 then
+			set currentValue to vignetting amount of adjustments of owner
+			if currentValue is not 0 then
 				set vignetting amount of adjustments of owner to 0
-				set end of dropped to "Vignetting " & x
+				set end of dropped to "Vignetting " & my numberText(currentValue)
 			end if
 		end try
 		try
-			set x to sharpening amount of adjustments of owner
-			if x is not 0 then
+			set currentValue to sharpening amount of adjustments of owner
+			if currentValue is not 0 then
 				set sharpening amount of adjustments of owner to 0
-				set end of dropped to "Sharpening " & x
+				set end of dropped to "Sharpening " & my numberText(currentValue)
 			end if
 		end try
 		try
-			set x to noise reduction luminance of adjustments of owner
-			if x is not 0 then
+			set currentValue to noise reduction luminance of adjustments of owner
+			if currentValue is not 0 then
 				set noise reduction luminance of adjustments of owner to 0
-				set end of dropped to "Noise Reduction " & x
+				set end of dropped to "Noise Reduction " & my numberText(currentValue)
 			end if
 		end try
 		try
-			set x to noise reduction color of adjustments of owner
-			if x is not 0 then
+			set currentValue to noise reduction color of adjustments of owner
+			if currentValue is not 0 then
 				set noise reduction color of adjustments of owner to 0
-				set end of dropped to "Color Noise Reduction " & x
+				set end of dropped to "Color Noise Reduction " & my numberText(currentValue)
 			end if
 		end try
 		try
-			set x to noise reduction single pixel of adjustments of owner
-			if x is not 0 then
+			set currentValue to noise reduction single pixel of adjustments of owner
+			if currentValue is not 0 then
 				set noise reduction single pixel of adjustments of owner to 0
-				set end of dropped to "Single Pixel " & x
+				set end of dropped to "Single Pixel " & my numberText(currentValue)
 			end if
 		end try
 		try
-			set x to film grain impact of adjustments of owner
-			if x is not 0 then
+			set currentValue to film grain impact of adjustments of owner
+			if currentValue is not 0 then
 				set film grain impact of adjustments of owner to 0
-				set end of dropped to "Film Grain " & x
+				set end of dropped to "Film Grain " & my numberText(currentValue)
 			end if
 		end try
 		try
-			set x to moire amount of adjustments of owner
-			if x is not 0 then
+			set currentValue to moire amount of adjustments of owner
+			if currentValue is not 0 then
 				set moire amount of adjustments of owner to 0
-				set end of dropped to "Moiré " & x
+				set end of dropped to "Moiré " & my numberText(currentValue)
 			end if
 		end try
 	end tell
@@ -349,21 +360,24 @@ on render(doc, v, outName, renderDir)
 	end tell
 	if jobId starts with "ERROR" then error "Capture One could not process the grid (" & jobId & "). Processing from scripts needs Capture One Pro."
 
+	set idleChecks to 0
 	repeat 600 times -- up to 5 minutes
 		delay 0.5
+		set pending to 0
+		try
+			tell application "Capture One" to set pending to count of (every job of doc whose id is jobId)
+		end try
 		set found to do shell script "ls " & quoted form of renderDir & " | grep '^" & outName & "\\.' | head -n 1"
-		if found is not "" then
-			set pending to 0
-			try
-				tell application "Capture One" to set pending to count of (every job of doc whose id is jobId)
-			end try
-			if pending is 0 then
-				set renderedFile to renderDir & "/" & found
-				set sizeBefore to do shell script "stat -f %z " & quoted form of renderedFile
-				delay 0.5
-				set sizeAfter to do shell script "stat -f %z " & quoted form of renderedFile
-				if sizeBefore is sizeAfter and sizeAfter is not "0" then return renderedFile
-			end if
+		if found is not "" and pending is 0 then
+			set renderedFile to renderDir & "/" & found
+			set sizeBefore to do shell script "stat -f %z " & quoted form of renderedFile
+			delay 0.5
+			set sizeAfter to do shell script "stat -f %z " & quoted form of renderedFile
+			if sizeBefore is sizeAfter and sizeAfter is not "0" then return renderedFile
+		else if pending is 0 then
+			-- The job is done but no file has appeared: give it 10 seconds, then stop.
+			set idleChecks to idleChecks + 1
+			if idleChecks > 20 then error "Capture One processed the grid, but the file isn’t in " & renderDir & ". Check the “c1lut” process recipe in the c1lut session."
 		end if
 	end repeat
 	error "Capture One did not finish processing the grid within 5 minutes."
@@ -379,7 +393,7 @@ on showSummary(summary)
 		set choice to button returned of (display dialog msg buttons {"Show in Finder", "OK"} default button "OK" with title "c1lut")
 	end tell
 	if choice is "Show in Finder" then do shell script "open " & quoted form of (outFolder of summary)
-	if (targetId of summary) is "lumix" then my offerCardCopy(lutFiles of summary)
+	if (targetId of summary) starts with "lumix" then my offerCardCopy(lutFiles of summary)
 end showSummary
 
 -- Lumix cameras load LUTs from the top folder of the memory card.
@@ -473,3 +487,10 @@ on plural(n)
 	if n is 1 then return ""
 	return "s"
 end plural
+
+-- Adjustment values as Capture One shows them, e.g. -0.2 rather than -0.20000000298.
+on numberText(value)
+	set rounded to (round (value * 10) rounding as taught in school) / 10
+	if rounded mod 1 is 0 then return (rounded as integer) as text
+	return rounded as text
+end numberText

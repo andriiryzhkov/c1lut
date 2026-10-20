@@ -68,13 +68,22 @@ git clone https://github.com/andriiryzhkov/c1lut.git && cd c1lut && ./install.sh
 ## First run
 
 1. In Capture One choose **File › New Session…**, name it `c1lut` and save it anywhere, for
-   example in Documents. c1lut works only in this session, so your catalogs stay untouched.
-2. Choose **Scripts › Export Styles as LUTs**, pick a target and your styles.
+   example in Pictures. c1lut works only in this session, so your catalogs stay untouched.
+2. Choose **Scripts › Export Styles as LUTs**. A window opens with Capture One's styles in their
+   folders, as in its Styles tool. Open and close folders with the triangles, select the styles
+   you want (selecting a folder selects everything in it), choose what the LUTs are for, and click
+   **Export**.
 3. Point c1lut at the `c1lut` session file (`c1lut.cosessiondb`). It remembers it.
 4. macOS asks once whether the script may control Capture One. Allow it.
 
-c1lut then opens its session, renders each style and shows a summary. LUTs are saved in
-`~/Documents/c1lut/<target>/`.
+c1lut then opens its session, renders each style and shows a summary that lists, per style,
+anything that couldn't be kept. LUTs are saved in `~/Documents/c1lut/<target>/`.
+
+In its session, c1lut keeps its grid image in the Capture folder and renders into the Output
+folder, deleting each render once its LUT is written.
+
+If two styles have the same name, Capture One's scripting can only apply the first one, so the
+window greys out the other. Rename it in Capture One to export it.
 
 ## Panasonic's V-Log to V-709 LUT
 
@@ -99,11 +108,15 @@ clipped.
 
 ## Targets
 
-| Target | Input → output | Points | File names |
-|---|---|---|---|
-| `lumix` | V-Log → Rec.709 | 33 | Up to 8 letters and digits, e.g. `PORTRAIT.cube` |
-| `vlog` | V-Log → Rec.709, e.g. for DaVinci Resolve | 33 | The style name |
-| `rec709` | Rec.709 → Rec.709, e.g. a Resolve timeline | 33 | The style name |
+| Target | In the window | Input → output | Points | File names |
+|---|---|---|---|---|
+| `lumix` | Lumix camera, SDXC card (64 GB and larger) | V-Log → Rec.709 | 33 | The style name in letters and digits, e.g. `PortraitWarm.cube` |
+| `lumix-sd` | Lumix camera, SD/SDHC card (32 GB and smaller) | V-Log → Rec.709 | 33 | Up to 8 letters and digits, e.g. `PORTRAIT.cube` |
+| `vlog` | V-Log footage | V-Log → Rec.709, e.g. for DaVinci Resolve | 33 | The style name |
+| `rec709` | Rec.709 footage | Rec.709 → Rec.709, e.g. a Resolve timeline | 33 | The style name |
+
+The two Lumix targets make the same LUTs and differ only in file names. Lumix cameras accept up
+to 8 letters and digits on SD/SDHC cards (FAT32) and longer names on SDXC cards (exFAT).
 
 ## Loading LUTs on a Lumix camera
 
@@ -137,11 +150,13 @@ c1lut styles
 c1lut export --target lumix "Portrait Warm" "Street B&W"
 ```
 
+Without style names, `c1lut export` opens the same window as the Scripts menu.
+
 To preview a LUT, apply it to a V-Log JPEG from the camera and compare it with the same raw
 file edited in Capture One:
 
 ```bash
-c1lut apply ~/Documents/c1lut/lumix/PORTRAIT.cube P1000123.JPG preview.jpg
+c1lut apply ~/Documents/c1lut/lumix/PortraitWarm.cube P1000123.JPG preview.jpg
 ```
 
 `c1lut help` lists the lower-level commands (`grid`, `check`, `build`, `setup`, `targets`,
@@ -154,6 +169,9 @@ c1lut apply ~/Documents/c1lut/lumix/PORTRAIT.cube P1000123.JPG preview.jpg
   up itself; if you changed it, fix it or delete the recipe and run again.
 - **"Neighbouring colors bled into each other"**: a local adjustment survived, usually from a
   style setting c1lut doesn't know about. The LUT may look noisy.
+- **"Capture One processed the grid, but the file isn't in …"**: the `c1lut` process recipe in
+  the c1lut session must write to the session's Output folder. Delete the recipe and run again;
+  c1lut recreates it.
 - **Nothing happens after choosing styles**: see `~/Library/Application Support/c1lut/export.log`.
 
 ## Uninstall
@@ -168,8 +186,11 @@ Capture One session stay; delete them yourself if you like.
 ## Development
 
 ```bash
-swift test
+scripts/test.sh
 ```
+
+This runs `swift test`. With only the Command Line Tools (no Xcode), it also tells the compiler
+where the testing macros are, which SwiftPM sometimes forgets there.
 
 - `Sources/C1LUTCore` handles `.cube` files, the grid and images. It's tested with a simulated
   style in place of Capture One.

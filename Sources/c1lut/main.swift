@@ -27,12 +27,13 @@ Usage:
       Turn Capture One's render of the grid with a style into a .cube, and print its path.
   c1lut apply <lut.cube> <input-image> <output.tif|png|jpg>
       Apply a LUT to an image, e.g. a V-Log JPEG, to preview it.
-  c1lut styles
-      List the styles Capture One can export.
-  c1lut export [--target <id>] <style> [<style> ...]
+  c1lut styles [--app <Capture One.app>]
+      List the styles Capture One can export, in its folders.
+  c1lut export [--target <id>] [<style> ...]
       Render styles in Capture One and build their LUTs (needs `c1lut install` and the
-      session chosen once from Capture One's Scripts menu).
-  c1lut path <render|output|support> [--target <id>]
+      session chosen once from Capture One's Scripts menu). Without style names, opens a
+      window to pick them.
+  c1lut path <output|support> [--target <id>]
       Print one of c1lut's folders.
 
 The default target is "lumix". Output goes to ~/Documents/c1lut/<target>.
@@ -47,6 +48,7 @@ struct CLIError: Error {
 enum ExitCode {
     static let missingBase: Int32 = 3
     static let checkFailed: Int32 = 4
+    static let cancelled: Int32 = 5
 }
 
 struct Arguments {
@@ -60,7 +62,10 @@ struct Arguments {
     init(_ args: ArraySlice<String>) throws {
         var it = args.makeIterator()
         while let arg = it.next() {
-            if arg.hasPrefix("--"), Self.knownFlags.contains(String(arg.dropFirst(2))) {
+            if arg == "--" {
+                // Everything after a bare "--" is positional, e.g. style names.
+                while let rest = it.next() { positional.append(rest) }
+            } else if arg.hasPrefix("--"), Self.knownFlags.contains(String(arg.dropFirst(2))) {
                 flags.insert(String(arg.dropFirst(2)))
             } else if arg.hasPrefix("--") {
                 guard let value = it.next() else { throw CLIError(message: "\(arg) needs a value") }
@@ -103,6 +108,49 @@ func noteOutputRange(of base: URL) {
         Its output is video range (black at 64). c1lut converts it to full range, which Lumix \
         cameras and Capture One expect.\n
         """.utf8))
+}
+
+/// Shows the picker, or with C1LUT_PICKER_SNAPSHOT=<file.png> draws it into that file instead
+/// (C1LUT_PICKER_SNAPSHOT_TOGGLE=<name>,<name> selects styles or folders first).
+func pickStyles(available: [String], args: Arguments) throws -> StylePicker.Choice? {
+    let tree = StyleTree(available: available, roots: StyleTree.standardRoots(app: captureOneApp(args)))
+    let picker = StylePicker(tree: tree, targets: Target.all, initialTarget: try args.target())
+    let environment = ProcessInfo.processInfo.environment
+    if let snapshot = environment["C1LUT_PICKER_SNAPSHOT"] {
+        let toggles = environment["C1LUT_PICKER_SNAPSHOT_TOGGLE"]?.split(separator: ",").map(String.init) ?? []
+        try picker.snapshot(to: URL(fileURLWithPath: snapshot), toggling: toggles)
+        return nil
+    }
+    return picker.run()
+}
+
+/// Capture One's style names, in its order.
+func availableStyles() throws -> [String] {
+    try osascriptOutput([
+        "-e", "tell application \"Capture One\" to set styleNames to available styles",
+        "-e", "set AppleScript's text item delimiters to linefeed",
+        "-e", "styleNames as text",
+    ]).split(separator: "\n").map(String.init)
+}
+
+func captureOneApp(_ args: Arguments) -> URL {
+    args.url("app") ?? URL(fileURLWithPath: "/Applications/Capture One.app")
+}
+
+/// Runs osascript and returns what it printed.
+func osascriptOutput(_ arguments: [String]) throws -> String {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+    process.arguments = arguments
+    let output = Pipe()
+    process.standardOutput = output
+    try process.run()
+    let data = output.fileHandleForReading.readDataToEndOfFile()
+    process.waitUntilExit()
+    guard process.terminationStatus == 0 else {
+        throw CLIError(message: "could not ask Capture One for its styles", code: process.terminationStatus)
+    }
+    return String(decoding: data, as: UTF8.self).trimmingCharacters(in: .newlines)
 }
 
 /// Runs osascript with the terminal's input and output, and returns its exit status.
@@ -233,8 +281,8 @@ func run(_ argv: [String]) throws {
         }
         let render = try RGBImage.read(contentsOf: try args.file(at: 0, "render file"))
         var reading = try Grid.read(render)
-        if target.shortNames && reading.lut.size > 33 {
-            throw CLIError(message: "\(target.id) LUTs can have at most 33 points; this grid has \(reading.lut.size)")
+        if let maxSize = target.maxSize, reading.lut.size > maxSize {
+            throw CLIError(message: "\(target.id) LUTs can have at most \(maxSize) points; this grid has \(reading.lut.size)")
         }
         if reading.maxBlockSpread > 1.5 / 255 {
             warn("""
@@ -269,31 +317,39 @@ func run(_ argv: [String]) throws {
         print(output.path)
 
     case "styles":
-        let status = osascript([
-            "-e", "tell application \"Capture One\" to set styleNames to available styles",
-            "-e", "set AppleScript's text item delimiters to linefeed",
-            "-e", "styleNames as text",
-        ])
-        if status != 0 { throw CLIError(message: "could not ask Capture One for its styles", code: status) }
+        let tree = StyleTree(available: try availableStyles(), roots: StyleTree.standardRoots(app: captureOneApp(args)))
+        for row in tree.rows {
+            print(row.display)
+        }
+
+    case "pick-styles":
+        // For the Capture One script: the picker window for the style names given after "--".
+        // Prints "target<TAB>id" and one "style<TAB>name" line per selected style.
+        guard let choice = try pickStyles(available: args.positional, args: args) else { exit(ExitCode.cancelled) }
+        print("target\t\(choice.target.id)")
+        for style in choice.styles {
+            print("style\t\(style)")
+        }
 
     case "export":
-        let target = try args.target()
-        guard !args.positional.isEmpty else {
-            throw CLIError(message: "usage: c1lut export [--target <id>] <style> [<style> ...]")
-        }
         let worker = Installation(workspace: workspace).worker
         guard FileManager.default.fileExists(atPath: worker.path) else {
             throw CLIError(message: "the Capture One worker script is missing; run `c1lut install` first")
         }
-        let status = osascript([worker.path, "cli", target.id] + args.positional)
+        var target = try args.target()
+        var styles = args.positional
+        if styles.isEmpty {
+            guard let choice = try pickStyles(available: availableStyles(), args: args) else { exit(ExitCode.cancelled) }
+            (target, styles) = (choice.target, choice.styles)
+        }
+        let status = osascript([worker.path, "cli", target.id] + styles)
         if status != 0 { exit(status) }
 
     case "path":
         switch args.positional.first {
-        case "render": print(workspace.renderDirectory.path)
         case "support": print(workspace.root.path)
         case "output": print(Workspace.defaultOutputDirectory.appendingPathComponent(try args.target().id).path)
-        default: throw CLIError(message: "usage: c1lut path <render|output|support> [--target <id>]")
+        default: throw CLIError(message: "usage: c1lut path <output|support> [--target <id>]")
         }
 
     case "help", "-h", "--help":
